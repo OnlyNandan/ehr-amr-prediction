@@ -1,5 +1,5 @@
 from typing import List, Optional
-from models import PatientData
+from .models import PatientData
 
 class PatientStore:
     def __init__(self):

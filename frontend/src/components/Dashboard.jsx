@@ -10,7 +10,6 @@ import LiveMonitor from './LiveMonitor';
 import NotificationToast from './NotificationToast';
 import BloodCellAnalyzer from './BloodCellAnalyzer';
 import RiskExplainer from './RiskExplainer';
-import SepsisEarlyWarning from './SepsisEarlyWarning';
 import { Search } from 'lucide-react';
 
 const Dashboard = ({ userRole }) => {
@@ -140,7 +139,6 @@ const Dashboard = ({ userRole }) => {
 
                             {/* Sidebar Controls */}
                             <div className="col-span-12 lg:col-span-4 space-y-6">
-                                <SepsisEarlyWarning patientData={patientData} />
                                 <BloodCellAnalyzer
                                     onAnalysisComplete={(counts) => {
                                         const updated = { ...patientData, wbc_count: counts.WBC * 1000 };
