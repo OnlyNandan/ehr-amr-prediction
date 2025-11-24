@@ -2,12 +2,14 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import LabelEncoder
-from typing import List, Tuple
-from .models import PatientData, RiskFeature, PredictionResult
+from typing import List, Tuple, Dict
+from models import PatientData, RiskFeature, PredictionResult
+import shap
 
 class MLEngine:
     def __init__(self):
         self.model = None
+        self.explainer = None
         self.feature_names = [
             "age", "wbc_count", "prior_antibiotics_days", "device_use", 
             "heart_rate", "temperature", "systolic_bp",
@@ -70,6 +72,9 @@ class MLEngine:
         
         self.model = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42)
         self.model.fit(X, y)
+        
+        # Initialize SHAP explainer
+        self.explainer = shap.TreeExplainer(self.model)
 
     def predict(self, data: PatientData) -> PredictionResult:
         # Prepare input vector
@@ -169,5 +174,62 @@ class MLEngine:
             risk_features=feature_impacts,
             recommendation=recommendation
         )
+    
+    def explain_prediction(self, data: PatientData) -> Dict:
+        """
+        Generate SHAP values for a prediction to explain feature contributions
+        """
+        try:
+            # Prepare input vector (same as in predict())
+            try:
+                gender_enc = self.encoders["gender"].transform([data.gender])[0]
+            except: 
+                gender_enc = 0
+                
+            try:
+                bact_enc = self.encoders["suspected_bacterium"].transform([data.suspected_bacterium])[0]
+            except: 
+                bact_enc = 0
+                
+            try:
+                abx_enc = self.encoders["candidate_antibiotic"].transform([data.candidate_antibiotic])[0]
+            except: 
+                abx_enc = 0
+            
+            features = np.array([[
+                data.age, data.wbc_count, data.prior_antibiotics_days, int(data.device_use),
+                data.heart_rate, data.temperature, data.systolic_bp,
+                gender_enc, bact_enc, abx_enc
+            ]])
+            
+            # Calculate SHAP values
+            shap_values = self.explainer.shap_values(features)
+            
+            # For binary classification, take values for class 1 (resistant)
+            if isinstance(shap_values, list):
+                shap_values = shap_values[1]
+            
+            # Create feature contribution dict
+            contributions = {}
+            for i, feature_name in enumerate(self.feature_names):
+                contributions[feature_name] = {
+                    "value": float(features[0][i]),
+                    "shap_value": float(shap_values[0][i])
+                }
+            
+            # Get base value (expected value)
+            base_value = float(self.explainer.expected_value[1] if isinstance(self.explainer.expected_value, list) else self.explainer.expected_value)
+            
+            return {
+                "base_value": base_value,
+                "contributions": contributions,
+                "prediction": float(self.model.predict_proba(features)[0][1])
+            }
+        
+        except Exception as e:
+            return {
+                "error": str(e),
+                "message": "Could not generate SHAP explanation"
+            }
 
 engine = MLEngine()

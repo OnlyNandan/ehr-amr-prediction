@@ -8,6 +8,8 @@ import HospitalMap from './HospitalMap';
 import PatientHistory from './PatientHistory';
 import LiveMonitor from './LiveMonitor';
 import NotificationToast from './NotificationToast';
+import BloodCellAnalyzer from './BloodCellAnalyzer';
+import RiskExplainer from './RiskExplainer';
 import { Search } from 'lucide-react';
 
 const Dashboard = ({ userRole }) => {
@@ -132,10 +134,18 @@ const Dashboard = ({ userRole }) => {
                             {/* Main Prediction Area */}
                             <div className="col-span-12 lg:col-span-8 space-y-6">
                                 <PredictionCard prediction={prediction} loading={loading} />
+                                <RiskExplainer patientData={patientData} />
                             </div>
 
                             {/* Sidebar Controls */}
-                            <div className="col-span-12 lg:col-span-4">
+                            <div className="col-span-12 lg:col-span-4 space-y-6">
+                                <BloodCellAnalyzer
+                                    onAnalysisComplete={(counts) => {
+                                        const updated = { ...patientData, wbc_count: counts.WBC * 1000 };
+                                        setPatientData(updated);
+                                        handlePredict(updated);
+                                    }}
+                                />
                                 <WhatIfPanel
                                     data={patientData}
                                     onChange={(newData) => {

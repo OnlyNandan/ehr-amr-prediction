@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from typing import List, Optional
-from ..models import PatientData, PredictionResult, HospitalStats
-from ..ml_engine import engine
+from models import PatientData, PredictionResult, HospitalStats
+from ml_engine import engine
 
 router = APIRouter()
 
@@ -22,7 +22,7 @@ async def get_hospital_stats():
         {"location": "ER", "resistance_rate": 0.45}
     ])
 
-from ..patient_store import store
+from patient_store import store
 
 @router.get("/patients", response_model=List[PatientData])
 async def get_patients(query: Optional[str] = None):
@@ -36,3 +36,15 @@ async def get_patient(patient_id: str):
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
     return patient
+
+@router.post("/explain")
+async def explain_prediction(data: PatientData):
+    """
+    Generate SHAP-based explanation for a prediction
+    """
+    try:
+        explanation = engine.explain_prediction(data)
+        return explanation
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
