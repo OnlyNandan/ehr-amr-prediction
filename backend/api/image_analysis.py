@@ -4,71 +4,61 @@ import cv2
 import numpy as np
 from io import BytesIO
 import base64
+from ultralytics import YOLO
+import os
 
 router = APIRouter(
     prefix="/api/image-analysis",
     tags=["Image Analysis"]
 )
 
-# Mock cell detection for now - in production, you'd use a trained YOLO model
+# Load YOLO model (do this once at module load time)
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "models", "bccd_yolov8_best.pt")
+model = YOLO(MODEL_PATH)
+
+# Class mapping (BCCD dataset actual classes)
+CLASS_NAMES = {
+    0: "RBC",
+    1: "WBC", 
+    2: "Platelets"
+}
+
 def detect_blood_cells(image_array: np.ndarray) -> Dict:
     """
-    Mock detection function. In production, replace with:
-    from ultralytics import YOLO
-    model = YOLO('path/to/trained/model.pt')
-    results = model(image_array)
+    Real YOLO detection using BCCD-trained model
     """
-    # Simulate detection results
-    height, width = image_array.shape[:2]
+    # Run inference with lower confidence threshold for better detection
+    results = model(image_array, conf=0.15, iou=0.45)
     
-    # Mock detections with random positions
-    np.random.seed(42)  # For reproducibility
-    
-    # Simulate WBC, RBC, and Platelet counts
-    wbc_count = np.random.randint(15, 25)
-    rbc_count = np.random.randint(80, 120)
-    platelet_count = np.random.randint(40, 60)
-    
-    # Generate mock bounding boxes
+    # Parse results
     detections = []
+    counts = {"WBC": 0, "RBC": 0, "Platelets": 0}
     
-    # Add WBC detections (larger, less numerous)
-    for i in range(wbc_count):
-        x = np.random.randint(0, width - 30)
-        y = np.random.randint(0, height - 30)
-        detections.append({
-            "type": "WBC",
-            "bbox": [int(x), int(y), int(x + 25), int(y + 25)],
-            "confidence": float(np.random.uniform(0.85, 0.98))
-        })
-    
-    # Add RBC detections (smaller, more numerous)
-    for i in range(rbc_count):
-        x = np.random.randint(0, width - 15)
-        y = np.random.randint(0, height - 15)
-        detections.append({
-            "type": "RBC",
-            "bbox": [int(x), int(y), int(x + 12), int(y + 12)],
-            "confidence": float(np.random.uniform(0.80, 0.95))
-        })
-    
-    # Add Platelet detections (smallest)
-    for i in range(platelet_count):
-        x = np.random.randint(0, width - 8)
-        y = np.random.randint(0, height - 8)
-        detections.append({
-            "type": "Platelet",
-            "bbox": [int(x), int(y), int(x + 6), int(y + 6)],
-            "confidence": float(np.random.uniform(0.75, 0.92))
-        })
+    for result in results:
+        boxes = result.boxes
+        for box in boxes:
+            # Get class and confidence
+            cls = int(box.cls[0])
+            conf = float(box.conf[0])
+            xyxy = box.xyxy[0].cpu().numpy()
+            
+            # Map class ID to name
+            cell_type = CLASS_NAMES.get(cls, "Unknown")
+            
+            # Count cells
+            if cell_type in counts:
+                counts[cell_type] += 1
+            
+            # Store detection
+            detections.append({
+                "type": cell_type,
+                "bbox": [int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])],
+                "confidence": conf
+            })
     
     return {
         "detections": detections,
-        "counts": {
-            "WBC": wbc_count,
-            "RBC": rbc_count,
-            "Platelet": platelet_count
-        }
+        "counts": counts
     }
 
 def draw_detections(image_array: np.ndarray, detections: List[Dict]) -> np.ndarray:
@@ -76,9 +66,9 @@ def draw_detections(image_array: np.ndarray, detections: List[Dict]) -> np.ndarr
     annotated_image = image_array.copy()
     
     colors = {
-        "WBC": (255, 0, 0),      # Blue
-        "RBC": (0, 0, 255),      # Red
-        "Platelet": (0, 255, 0)  # Green
+        "WBC": (255, 0, 0),        # Blue
+        "RBC": (0, 0, 255),        # Red
+        "Platelets": (0, 255, 0)   # Green
     }
     
     for detection in detections:
