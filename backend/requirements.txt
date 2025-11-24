@@ -8,3 +8,4 @@ python-multipart
 ultralytics
 opencv-python
 shap
+xgboost

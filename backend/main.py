@@ -30,6 +30,9 @@ app.include_router(simulation.router)
 from api import image_analysis
 app.include_router(image_analysis.router)
 
+from api import sepsis_routes
+app.include_router(sepsis_routes.router)
+
 @app.get("/")
 async def root():
     return {"message": "EHR AMR Prediction API is running"}
