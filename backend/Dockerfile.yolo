@@ -1,0 +1,47 @@
+# YOLO Inference Service Dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# Install system dependencies for OpenCV and YOLO
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+RUN pip install --no-cache-dir \
+    flask>=3.0.0 \
+    flask-cors>=4.0.0 \
+    gunicorn>=21.2.0 \
+    ultralytics>=8.0.0 \
+    opencv-python>=4.8.0 \
+    Pillow>=10.0.0 \
+    numpy>=1.24.0 \
+    prometheus-client>=0.19.0
+
+# Copy only YOLO inference code
+COPY services/yolo_inference.py /app/
+COPY yolo_server.py /app/
+
+# Create model directory
+RUN mkdir -p /app/models/trained
+
+# Create non-root user
+RUN useradd -m -u 1000 yolouser && chown -R yolouser:yolouser /app
+USER yolouser
+
+EXPOSE 5001
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:5001/health || exit 1
+
+CMD ["gunicorn", "--bind", "0.0.0.0:5001", "--workers", "2", "--timeout", "300", "yolo_server:app"]

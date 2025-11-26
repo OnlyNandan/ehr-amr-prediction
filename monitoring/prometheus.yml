@@ -1,0 +1,30 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+rule_files: []
+
+scrape_configs:
+  # AMR API metrics
+  - job_name: 'amr-api'
+    static_configs:
+      - targets: ['amr-api:5000']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+
+  # YOLO inference metrics
+  - job_name: 'yolo-inference'
+    static_configs:
+      - targets: ['yolo-inference:5001']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
