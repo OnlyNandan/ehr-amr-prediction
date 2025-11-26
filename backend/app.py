@@ -25,8 +25,12 @@ def create_app(config=None):
     logger = logging.getLogger(__name__)
     logger.info("Initializing AMR Prediction Application")
     
-    # Enable CORS
-    CORS(app, origins=config.CORS_ORIGINS)
+    # Enable CORS with full support
+    CORS(app, 
+         origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+         methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+         allow_headers=["Content-Type", "Authorization", "X-User-ID"],
+         supports_credentials=True)
     
     # Setup middleware (monitoring, audit logging)
     setup_middleware(app)
@@ -45,4 +49,4 @@ def create_app(config=None):
 
 if __name__ == "__main__":
     app = create_app()
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5001, debug=True)

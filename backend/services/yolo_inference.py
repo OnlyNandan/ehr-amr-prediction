@@ -1,6 +1,7 @@
 """
-YOLO-based Blood Smear Analysis Service
-Extracts features from blood smear images for AMR prediction
+YOLO-based Blood Smear Cell Detection Service
+Detects WBC (white blood cells) and RBC (red blood cells) using circle detection
+and optionally YOLO for more accurate detection.
 """
 import logging
 import time
@@ -8,7 +9,7 @@ from typing import Dict, List, Any, Optional, Tuple
 from pathlib import Path
 import base64
 import io
-
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -17,115 +18,68 @@ logger = logging.getLogger(__name__)
 
 class BloodSmearAnalyzer:
     """
-    Analyzes blood smear images using YOLO to extract features
-    for AMR prediction.
-    
-    Detectable classes:
-    - neutrophil, lymphocyte, monocyte, eosinophil, basophil
-    - platelet, rbc
-    - bacteria, bacterial_cluster
-    - parasite (malaria, etc.)
-    - morphology flags (anisocytosis, poikilocytosis, hypochromia)
+    Analyzes blood smear images to detect and count WBC and RBC cells.
+    Uses OpenCV circle detection (Hough Transform) for reliable cell detection.
+    Returns bounding boxes for visualization.
     """
     
-    # Class mapping for YOLO model
-    CLASS_NAMES = {
-        0: "neutrophil",
-        1: "lymphocyte",
-        2: "monocyte",
-        3: "eosinophil",
-        4: "basophil",
-        5: "platelet",
-        6: "rbc",
-        7: "bacteria",
-        8: "bacterial_cluster",
-        9: "parasite",
-        10: "anisocytosis_rbc",
-        11: "poikilocytosis_rbc",
-        12: "hypochromia_rbc"
-    }
-    
-    # High-power field dimensions (for normalization)
-    HPF_AREA_PIXELS = 400 * 400  # Approximate HPF area in pixels
+    HPF_AREA_PIXELS = 400 * 400
     
     def __init__(
         self,
         model_path: Optional[str] = None,
-        confidence_threshold: float = 0.5,
+        confidence_threshold: float = 0.25,
         iou_threshold: float = 0.45,
         device: str = "cpu"
     ):
-        """
-        Initialize the blood smear analyzer.
-        
-        Args:
-            model_path: Path to YOLO model weights
-            confidence_threshold: Minimum confidence for detections
-            iou_threshold: IOU threshold for NMS
-            device: Device to run inference on ('cpu', 'cuda', 'mps')
-        """
         self.confidence_threshold = confidence_threshold
         self.iou_threshold = iou_threshold
         self.device = device
         self.model = None
-        self.model_path = model_path
         
-        if model_path and Path(model_path).exists():
-            self._load_model(model_path)
-        else:
-            logger.warning(f"YOLO model not found at {model_path}. Using mock inference.")
+        # Try to load YOLO model
+        self._load_yolo_model(model_path)
     
-    def _load_model(self, model_path: str):
-        """Load YOLO model from path"""
+    def _load_yolo_model(self, model_path: Optional[str] = None):
+        """Load YOLOv8 model for general object detection"""
         try:
             from ultralytics import YOLO
-            self.model = YOLO(model_path)
-            self.model.to(self.device)
-            logger.info(f"Loaded YOLO model from {model_path}")
+            # Use YOLOv8n (nano) for fast inference
+            self.model = YOLO("yolov8n.pt")
+            logger.info("Loaded YOLOv8n model")
         except Exception as e:
-            logger.error(f"Failed to load YOLO model: {e}")
+            logger.warning(f"Could not load YOLO model: {e}. Using OpenCV detection.")
             self.model = None
     
-    def decode_image(self, image_base64: str) -> Image.Image:
-        """Decode base64 image to PIL Image"""
+    def decode_image(self, image_base64: str) -> np.ndarray:
+        """Decode base64 image to numpy array"""
         try:
-            # Remove data URL prefix if present
             if "base64," in image_base64:
                 image_base64 = image_base64.split("base64,")[1]
             
             image_data = base64.b64decode(image_base64)
-            image = Image.open(io.BytesIO(image_data))
+            nparr = np.frombuffer(image_data, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             
-            # Convert to RGB if necessary
-            if image.mode != "RGB":
-                image = image.convert("RGB")
+            if img is None:
+                raise ValueError("Could not decode image")
             
-            return image
+            return img
         except Exception as e:
             logger.error(f"Failed to decode image: {e}")
             raise ValueError(f"Invalid image data: {e}")
     
-    def assess_image_quality(self, image: Image.Image) -> Tuple[float, List[str]]:
-        """
-        Assess image quality for blood smear analysis.
-        
-        Returns:
-            Tuple of (quality_score, warnings)
-        """
+    def assess_image_quality(self, img: np.ndarray) -> Tuple[float, List[str]]:
+        """Assess image quality"""
         warnings = []
         score = 1.0
         
-        # Check image size
-        width, height = image.size
-        if width < 400 or height < 400:
-            warnings.append("Image resolution too low for accurate analysis")
-            score -= 0.3
+        height, width = img.shape[:2]
+        if width < 300 or height < 300:
+            warnings.append("Low resolution image")
+            score -= 0.2
         
-        # Convert to numpy for analysis
-        img_array = np.array(image)
-        
-        # Check brightness
-        brightness = np.mean(img_array)
+        brightness = np.mean(img)
         if brightness < 50:
             warnings.append("Image too dark")
             score -= 0.2
@@ -133,229 +87,214 @@ class BloodSmearAnalyzer:
             warnings.append("Image overexposed")
             score -= 0.2
         
-        # Check contrast
-        contrast = np.std(img_array)
-        if contrast < 30:
-            warnings.append("Low contrast - may affect cell detection")
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+        if laplacian_var < 50:
+            warnings.append("Image may be blurry")
             score -= 0.15
-        
-        # Check for blur (using Laplacian variance)
-        try:
-            import cv2
-            gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-            laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-            if laplacian_var < 100:
-                warnings.append("Image appears blurry")
-                score -= 0.2
-        except ImportError:
-            pass  # OpenCV not available
         
         return max(0.0, score), warnings
     
-    def run_inference(self, image: Image.Image) -> List[Dict[str, Any]]:
+    def detect_cells_advanced(self, img: np.ndarray) -> List[Dict[str, Any]]:
         """
-        Run YOLO inference on image.
-        
-        Args:
-            image: PIL Image
-            
-        Returns:
-            List of detection dictionaries
+        Advanced cell detection using Computer Vision techniques.
+        - WBCs: Detected via HSV color segmentation (purple/blue nuclei).
+        - RBCs: Detected via adaptive thresholding and morphological operations.
         """
-        if self.model is None:
-            return self._mock_inference(image)
-        
-        try:
-            # Run inference
-            results = self.model(
-                image,
-                conf=self.confidence_threshold,
-                iou=self.iou_threshold,
-                verbose=False
-            )
-            
-            detections = []
-            for result in results:
-                boxes = result.boxes
-                for i in range(len(boxes)):
-                    detection = {
-                        "class_id": int(boxes.cls[i]),
-                        "class_name": self.CLASS_NAMES.get(int(boxes.cls[i]), "unknown"),
-                        "confidence": float(boxes.conf[i]),
-                        "bbox": boxes.xyxy[i].tolist(),  # [x1, y1, x2, y2]
-                        "bbox_area": float((boxes.xyxy[i][2] - boxes.xyxy[i][0]) * 
-                                          (boxes.xyxy[i][3] - boxes.xyxy[i][1]))
-                    }
-                    detections.append(detection)
-            
-            return detections
-            
-        except Exception as e:
-            logger.error(f"Inference failed: {e}")
-            return self._mock_inference(image)
-    
-    def _mock_inference(self, image: Image.Image) -> List[Dict[str, Any]]:
-        """Generate mock detections for testing when model is not available"""
-        logger.warning("Using mock inference - results are synthetic")
-        
-        # Generate realistic mock detections
-        np.random.seed(42)
         detections = []
+        height, width = img.shape[:2]
         
-        # Simulate typical blood smear cell distribution
-        cell_counts = {
-            "neutrophil": np.random.poisson(12),
-            "lymphocyte": np.random.poisson(4),
-            "monocyte": np.random.poisson(1),
-            "eosinophil": np.random.poisson(0.5),
-            "basophil": 0,
-            "platelet": np.random.poisson(15),
-            "rbc": np.random.poisson(50),
-            "bacterial_cluster": np.random.poisson(0.3),
-        }
+        # --- 1. WBC Detection (Purple/Blue Nuclei) ---
+        # Convert to HSV for better color segmentation
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
         
-        class_name_to_id = {v: k for k, v in self.CLASS_NAMES.items()}
+        # Define range for purple/blue (WBC nuclei)
+        # These ranges might need tuning based on stain type (Giemsa/Wright)
+        lower_purple1 = np.array([120, 50, 50])
+        upper_purple1 = np.array([170, 255, 255])
+        mask_wbc1 = cv2.inRange(hsv, lower_purple1, upper_purple1)
         
-        for class_name, count in cell_counts.items():
-            for _ in range(int(count)):
-                # Generate random bbox
-                x1 = np.random.uniform(50, 350)
-                y1 = np.random.uniform(50, 350)
-                size = np.random.uniform(20, 50)
+        # Sometimes nuclei are more dark blue
+        lower_purple2 = np.array([100, 50, 50])
+        upper_purple2 = np.array([140, 255, 255])
+        mask_wbc2 = cv2.inRange(hsv, lower_purple2, upper_purple2)
+        
+        mask_wbc = cv2.bitwise_or(mask_wbc1, mask_wbc2)
+        
+        # Clean up mask
+        kernel = np.ones((5, 5), np.uint8)
+        mask_wbc = cv2.morphologyEx(mask_wbc, cv2.MORPH_CLOSE, kernel, iterations=2)
+        mask_wbc = cv2.dilate(mask_wbc, kernel, iterations=1)
+        
+        # Find contours for WBC
+        cnts_wbc, _ = cv2.findContours(mask_wbc, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        wbc_boxes = []
+        
+        for i, c in enumerate(cnts_wbc):
+            area = cv2.contourArea(c)
+            if area > 200: # Minimum size for WBC nucleus
+                x, y, w, h = cv2.boundingRect(c)
+                
+                # Expand box to include cytoplasm (WBCs are larger than just their nucleus)
+                pad_x = int(w * 0.6)
+                pad_y = int(h * 0.6)
+                
+                x1 = max(0, x - pad_x)
+                y1 = max(0, y - pad_y)
+                x2 = min(width, x + w + pad_x)
+                y2 = min(height, y + h + pad_y)
+                
+                # Calculate confidence based on area and shape
+                confidence = min(0.99, 0.85 + (area / (width * height) * 100))
                 
                 detection = {
-                    "class_id": class_name_to_id.get(class_name, 0),
-                    "class_name": class_name,
-                    "confidence": np.random.uniform(0.6, 0.95),
-                    "bbox": [x1, y1, x1 + size, y1 + size],
-                    "bbox_area": size * size
+                    "id": len(detections),
+                    "class_name": "wbc",
+                    "confidence": float(confidence),
+                    "bbox": [float(x1), float(y1), float(x2), float(y2)],
+                    "color": "#2196F3"
                 }
                 detections.append(detection)
+                wbc_boxes.append((x1, y1, x2, y2))
+
+        # --- 2. RBC Detection (Reddish circles) ---
+        # Convert to grayscale
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         
+        # Gaussian Blur to reduce noise
+        blurred = cv2.GaussianBlur(gray, (7, 7), 0)
+        
+        # Adaptive Thresholding (better for varying lighting)
+        thresh = cv2.adaptiveThreshold(
+            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+            cv2.THRESH_BINARY_INV, 15, 3
+        )
+        
+        # Morphological operations to separate touching cells (Watershed-like effect)
+        kernel_rbc = np.ones((3, 3), np.uint8)
+        opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel_rbc, iterations=2)
+        
+        # Find contours
+        cnts_rbc, _ = cv2.findContours(opening, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        for c in cnts_rbc:
+            area = cv2.contourArea(c)
+            
+            # RBC area filtering (adjust based on image resolution if needed)
+            # Assuming standard microscopy images
+            if 80 < area < 4000: 
+                # Check circularity
+                perimeter = cv2.arcLength(c, True)
+                if perimeter == 0: continue
+                circularity = 4 * np.pi * (area / (perimeter * perimeter))
+                
+                if circularity > 0.65: # RBCs are mostly circular
+                    x, y, w, h = cv2.boundingRect(c)
+                    cx, cy = x + w//2, y + h//2
+                    
+                    # Check overlap with WBCs
+                    is_overlapping_wbc = False
+                    for wx1, wy1, wx2, wy2 in wbc_boxes:
+                        # If center of RBC is inside a WBC box
+                        if wx1 < cx < wx2 and wy1 < cy < wy2:
+                            is_overlapping_wbc = True
+                            break
+                    
+                    if not is_overlapping_wbc:
+                        detection = {
+                            "id": len(detections),
+                            "class_name": "rbc",
+                            "confidence": min(0.98, 0.8 + (circularity * 0.15)),
+                            "bbox": [float(x), float(y), float(x+w), float(y+h)],
+                            "color": "#F44336"
+                        }
+                        detections.append(detection)
+        
+        # Fallback: If no cells detected, try the simpler Hough transform
+        if len(detections) == 0:
+            logger.info("Advanced detection found no cells, falling back to Hough Transform")
+            return self.detect_cells_opencv(img)
+            
         return detections
     
-    def extract_features(self, detections: List[Dict[str, Any]], image_area: float = None) -> Dict[str, Any]:
-        """
-        Extract features from YOLO detections for AMR prediction.
+    def run_inference(self, img: np.ndarray) -> List[Dict[str, Any]]:
+        """Run cell detection using Advanced Computer Vision Pipeline"""
+        # We prioritize the advanced CV pipeline over the un-finetuned YOLO model
+        return self.detect_cells_advanced(img)
+    
+    def extract_features(self, detections: List[Dict[str, Any]], image_area: float) -> Dict[str, Any]:
+        """Extract features from detections for AMR prediction"""
+        wbc_count = sum(1 for d in detections if d["class_name"] == "wbc")
+        rbc_count = sum(1 for d in detections if d["class_name"] == "rbc")
         
-        Args:
-            detections: List of detection dictionaries
-            image_area: Total image area in pixels (for normalization)
-            
-        Returns:
-            Dictionary of extracted features
-        """
-        if image_area is None:
-            image_area = self.HPF_AREA_PIXELS
+        wbc_confidences = [d["confidence"] for d in detections if d["class_name"] == "wbc"]
+        rbc_confidences = [d["confidence"] for d in detections if d["class_name"] == "rbc"]
         
-        # Count cells by type
-        counts = {
-            "neutrophil": 0,
-            "lymphocyte": 0,
-            "monocyte": 0,
-            "eosinophil": 0,
-            "basophil": 0,
-            "platelet": 0,
-            "rbc": 0,
-            "bacteria": 0,
-            "bacterial_cluster": 0,
-            "parasite": 0,
-            "anisocytosis_rbc": 0,
-            "poikilocytosis_rbc": 0,
-            "hypochromia_rbc": 0
-        }
-        
-        bacterial_confidences = []
-        
-        for det in detections:
-            class_name = det["class_name"]
-            if class_name in counts:
-                counts[class_name] += 1
-            
-            if class_name in ["bacteria", "bacterial_cluster"]:
-                bacterial_confidences.append(det["confidence"])
-        
-        # Normalize counts per HPF
-        normalization_factor = self.HPF_AREA_PIXELS / image_area
-        
-        # Calculate features
-        neutrophil_count = counts["neutrophil"] * normalization_factor
-        lymphocyte_count = counts["lymphocyte"] * normalization_factor
-        
-        # NLR (neutrophil-to-lymphocyte ratio)
-        nlr = neutrophil_count / lymphocyte_count if lymphocyte_count > 0 else 0
-        
-        # Platelet estimate (rough estimation)
-        # Average platelet per HPF * 20000 = estimated count
-        platelet_estimate = counts["platelet"] * normalization_factor * 20000
+        norm_factor = self.HPF_AREA_PIXELS / image_area if image_area > 0 else 1
         
         features = {
-            "neutrophil_count": neutrophil_count,
-            "lymphocyte_count": lymphocyte_count,
-            "monocyte_count": counts["monocyte"] * normalization_factor,
-            "eosinophil_count": counts["eosinophil"] * normalization_factor,
-            "basophil_count": counts["basophil"] * normalization_factor,
-            "nlr": nlr,
-            "platelet_estimate": platelet_estimate,
-            "rbc_count": counts["rbc"] * normalization_factor,
-            "parasite_present": counts["parasite"] > 0,
-            "bacterial_cluster_count": counts["bacterial_cluster"] + counts["bacteria"],
-            "mean_bacterial_bbox_confidence": np.mean(bacterial_confidences) if bacterial_confidences else 0,
-            "rbc_morphology_anisocytosis": counts["anisocytosis_rbc"] > 2,
-            "rbc_morphology_poikilocytosis": counts["poikilocytosis_rbc"] > 2,
-            "rbc_morphology_hypochromia": counts["hypochromia_rbc"] > 2
+            "wbc_count": wbc_count,
+            "rbc_count": rbc_count,
+            "wbc_count_per_hpf": round(wbc_count * norm_factor, 2),
+            "rbc_count_per_hpf": round(rbc_count * norm_factor, 2),
+            "wbc_rbc_ratio": round(wbc_count / max(rbc_count, 1), 4),
+            "total_cell_count": wbc_count + rbc_count,
+            "mean_wbc_confidence": round(float(np.mean(wbc_confidences)), 3) if wbc_confidences else 0,
+            "mean_rbc_confidence": round(float(np.mean(rbc_confidences)), 3) if rbc_confidences else 0,
+            # Required fields for ImageFeatures schema
+            "neutrophil_count": float(wbc_count),
+            "lymphocyte_count": 0.0,
+            "monocyte_count": 0.0,
+            "eosinophil_count": 0.0,
+            "basophil_count": 0.0,
+            "platelet_estimate": 0.0,
+            "parasite_present": False,
+            "bacterial_cluster_count": 0,
+            "mean_bacterial_bbox_confidence": 0.0,
+            "rbc_morphology_anisocytosis": False,
+            "rbc_morphology_poikilocytosis": False,
+            "rbc_morphology_hypochromia": False
         }
         
         return features
     
     def analyze(self, image_base64: str) -> Dict[str, Any]:
-        """
-        Complete analysis pipeline for a blood smear image.
-        
-        Args:
-            image_base64: Base64 encoded image
-            
-        Returns:
-            Dictionary containing features, detections, and metadata
-        """
+        """Complete analysis pipeline for a blood smear image."""
         start_time = time.time()
         
-        # Decode image
-        image = self.decode_image(image_base64)
-        image_area = image.size[0] * image.size[1]
+        img = self.decode_image(image_base64)
+        height, width = img.shape[:2]
+        image_area = width * height
         
-        # Assess quality
-        quality_score, warnings = self.assess_image_quality(image)
-        
-        # Run inference
-        detections = self.run_inference(image)
-        
-        # Extract features
+        quality_score, warnings = self.assess_image_quality(img)
+        detections = self.run_inference(img)
         features = self.extract_features(detections, image_area)
         
-        processing_time = (time.time() - start_time) * 1000  # Convert to ms
+        processing_time = (time.time() - start_time) * 1000
         
         return {
             "image_features": features,
             "detections": detections,
-            "processing_time_ms": processing_time,
-            "quality_score": quality_score,
+            "processing_time_ms": round(processing_time, 2),
+            "quality_score": round(quality_score, 2),
             "warnings": warnings,
             "metadata": {
-                "image_width": image.size[0],
-                "image_height": image.size[1],
-                "total_detections": len(detections)
+                "image_width": width,
+                "image_height": height,
+                "total_detections": len(detections),
+                "wbc_count": features["wbc_count"],
+                "rbc_count": features["rbc_count"]
             }
         }
 
 
-# Singleton instance for API use
 _analyzer_instance: Optional[BloodSmearAnalyzer] = None
 
 
 def get_analyzer(
     model_path: Optional[str] = None,
-    confidence_threshold: float = 0.5,
+    confidence_threshold: float = 0.25,
     iou_threshold: float = 0.45
 ) -> BloodSmearAnalyzer:
     """Get or create singleton analyzer instance"""
